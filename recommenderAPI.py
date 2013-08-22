@@ -1,0 +1,1037 @@
+'''
+Created on Nov 6, 2012
+
+@author: Ante Odic
+'''
+import numpy
+import logging
+logging.basicConfig(filename='./logs/example.log',level=logging.DEBUG)
+import math
+import configparser
+from bottle import route, run, post, request
+from bottle import default_app
+############################## GLOBAL VARIABLES WITH DEFAULT VALUES ##############################
+
+# mf construction parameters  
+#contextType = "multiple"
+#contextVariable = 1
+
+# data paths
+mainDataPath = './clientInformation'
+mainResultPath = './trainedData'
+
+
+# global matrices
+userBiasesMatrix = 0
+itemBiasesMatrix = 0
+globalBiasMatrix = 0
+userFeaturesMatrix = 0 
+itemFeaturesMatrix = 0 
+multipleContextUserBiasesMatrix = 0
+contextValPerVar = 0
+
+# mf parameters
+biasLearning = 0
+pLearningRate = 0.01
+qLearningRate = 0.01
+bLearningRate = 0.01
+regularization = 0.005
+numOfFeatures = 10
+numOfIterations = 100
+initFeatureValue = 0.03
+####################################################################################################
+
+@post('/recsys')
+def getRequestForRecSys():
+		
+	functionName = 	request.forms.get('fName')
+	
+	if str(request.forms.get('context')) == 'None':
+		context = (0,0)
+	
+	if functionName == 'getTopN_MF': rez = getTopN_MF(request.forms.get('clientID'),int(request.forms.get('userID')),int(request.forms.get('N')), context)
+	elif functionName == 'getRating_MF': rez = getRating_MF(request.forms.get('clientID'),int(request.forms.get('userID')), int(request.forms.get('itemID')),context)
+	elif functionName == 'getBottomN_MF': rez = getBottomN_MF(request.forms.get('clientID'),int(request.forms.get('userID')),int(request.forms.get('N')), context)
+	elif functionName == 'getRandomItems': rez = getRandomItems_fromSubSet(request.forms.get('clientID'),int(request.forms.get('N')), int(request.forms.get('subSet')))
+	elif functionName == 'getDiverseNavoid': 
+		initialSetIds = request.forms.get('initialSetIds')
+		initialSetIds = initialSetIds.split(',')
+		initialSetIds = [int(i) for i in initialSetIds]
+		avoidSetIds = request.forms.get('avoidSetIds')
+		avoidSetIds = avoidSetIds.split(',')
+		avoidSetIds = [int(i) for i in avoidSetIds]
+		rez = getDiverse4_fromSubSet_Vodlan(request.forms.get('clientID'),initialSetIds,int(request.forms.get('N')),int(request.forms.get('subSet')), avoidSetIds)
+	elif functionName == 'getSimilarN': rez = getSimilarN_fromSubSet(request.forms.get('clientID'),int(request.forms.get('initialSetId')),int(request.forms.get('N')),int(request.forms.get('subSet')))
+	elif functionName == 'getSimilarNavoid': 
+		avoidSetIds = request.forms.get('avoidSetIds')
+		avoidSetIds = avoidSetIds.split(',')
+		avoidSetIds = [int(i) for i in avoidSetIds]
+		rez = rez = getSimilarN_fromSubSet_avoid(request.forms.get('clientID'),int(request.forms.get('initialSetId')),int(request.forms.get('N')),int(request.forms.get('subSet')), avoidSetIds)
+	
+	
+	else: rez = 'No function!!'
+	
+	return str(rez)	
+
+@post('/operate')
+def trainRecSys():
+    functionName = 	request.forms.get('fName')
+    
+    if functionName == 'train': 
+        train_MF(request.forms.get('clientID')) 
+        rez = 'Training completed!'
+    elif functionName == 'validate': 
+        validate_MF(request.forms.get('clientID'))
+        rez = 'Validation completed!'
+    elif functionName == 'initialize': 
+        initializeClientConfFile (request.forms.get('clientID'), request.forms.get('contextType'))
+        rez = 'Initialization completed!'
+    elif functionName == 'initializeSubSet': 
+        initializeItemSubset (request.forms.get('clientID'))
+        rez = 'Items subset initialization completed!'
+    else: rez = 'No function!!'
+    return rez
+
+
+######################################## CLIENT FUNCTIONS ##########################################
+def getRating_MF(*arg):#agr:[0] = clientID, [1]=userID, [2]=itemID, [3]=context
+    confFileName = mainDataPath + '/' + arg[0] + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    cType = config.get('modelInfo', 'contexttype')
+    if cType == 'no':
+        return float(getRating(arg[0],arg[1],arg[2]))
+    elif cType == 'multiple':
+        return float(getRating_multiContext(arg[0],arg[1],arg[2],arg[3]))
+        
+    
+def getTopN_MF(*arg):#agr:[0] = clientID, [1]=userID, [2]=itemID, [3]=context
+    confFileName = mainDataPath + '/' + arg[0] + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    cType = config.get('modelInfo', 'contexttype')
+    if cType == 'no':
+        return getTopN(arg[0],arg[1],arg[2])
+    elif cType == 'multiple':
+        return getTopN_multiContext(arg[0],arg[1],arg[2],arg[3])
+
+def getBottomN_MF(*arg):#agr:[0] = clientID, [1]=userID, [2]=itemID, [3]=context
+    confFileName = mainDataPath + '/' + arg[0] + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    cType = config.get('modelInfo', 'contexttype')
+    if cType == 'no':
+        return getBottomN(arg[0],arg[1],arg[2])
+    elif cType == 'multiple':
+        return getBottomN_multiContext(arg[0],arg[1],arg[2],arg[3])
+####################################################################################################
+
+
+######################################## Provider Functions ##################################################
+
+def train_MF(clientName):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    cType = config.get('modelInfo', 'contexttype')
+    if cType == 'no':
+        trainPlainModel(clientName)
+    elif cType == 'multiple':
+        trainMultipleCntxtModel(clientName)
+    
+def validate_MF(clientName):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    cType = config.get('modelInfo', 'contexttype')
+    if cType == 'no':
+        return validatePlainModel(clientName)
+    elif cType == 'multiple':
+        return validateMultipleCntxtModel(clientName)
+
+
+####################################################################################################
+
+
+######################################## CLIENT CONFIGURATION ##################################################
+
+def initializeClientConfFile (clientName, contextType):
+    
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    datasetName = config.get('dataPath', 'datasetName')
+    #return confFileName
+    
+    dataSet=numpy.loadtxt(datasetName, delimiter=';')
+    # get dataset information
+    numOfItems = len(numpy.unique(dataSet[:,1]))
+    numOfUsers = len(numpy.unique(dataSet[:,0]))
+    minRating = min(numpy.unique(dataSet[:,2]))
+    maxRating = max(numpy.unique(dataSet[:,2]))
+    itemIDs = numpy.unique(dataSet[:,1])
+    itemIDs = [int(i) for i in itemIDs]
+    userIDs = numpy.unique(dataSet[:,0])
+    userIDs = [int(i) for i in userIDs]
+    getContextInformation(dataSet)
+    contextVarsAndVals = contextValPerVar
+    contextVarsAndVals = [int(i) for i in contextVarsAndVals]
+    
+    relevantContextMask = [1]*len(contextVarsAndVals)
+    
+    
+    config.add_section('dataInfo')
+    config.set('dataInfo', 'numOfItems', numOfItems)
+    config.set('dataInfo', 'numOfUsers', numOfUsers)
+    config.set('dataInfo', 'minRating', minRating)
+    config.set('dataInfo', 'maxRating', maxRating)
+    config.set('dataInfo', 'itemids', itemIDs)
+    config.set('dataInfo', 'userids', userIDs)
+    config.set('dataInfo', 'contextVarsAndVals', contextVarsAndVals)
+    with open(confFileName, 'w') as configfile:
+        config.write(configfile)
+    
+        config.add_section('modelInfo')
+    config.set('modelInfo', 'contextType', contextType)
+    config.set('modelInfo', 'relevantContextMask', relevantContextMask)
+    with open(confFileName, 'w') as configfile:
+        config.write(configfile)
+    
+    config.add_section('mfParameters')
+    config.set('mfParameters', 'biasLearning', biasLearning)
+    config.set('mfParameters', 'pLearningRate', pLearningRate)
+    config.set('mfParameters', 'qLearningRate', qLearningRate)
+    config.set('mfParameters', 'bLearningRate', bLearningRate)
+    config.set('mfParameters', 'regularization', regularization)
+    config.set('mfParameters', 'numOfFeatures', numOfFeatures)
+    config.set('mfParameters', 'numOfIterations', numOfIterations)
+    config.set('mfParameters', 'initFeatureValue', initFeatureValue)
+
+# Writing our configuration file to 'example.cfg'
+
+    with open(confFileName, 'w') as configfile:
+        config.write(configfile)
+    
+def initializeItemSubset(clientName):
+    subSetIDfile = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+    subSetIDs=numpy.loadtxt(subSetIDfile)
+    getFeaturesFromTxt(clientName)
+    
+    itemFeaturesSubSet = numpy.zeros(numpy.shape(itemFeaturesMatrix))
+    
+    for i in range(len(subSetIDs)):
+        itemFeaturesSubSet[subSetIDs[i],:] = itemFeaturesMatrix[subSetIDs[i],:]
+        
+    itemFeaturesSubSetFilename = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+    numpy.savetxt(itemFeaturesSubSetFilename,itemFeaturesSubSet,delimiter=';')   
+	
+####################################################################################################
+
+######################################## SET FUNCTIONS ##################################################
+#def setContextType(cType):
+#    global contextType
+#    contextType = cType
+    
+def setContextVariable(variable):
+    global contextVariable
+    contextVariable = variable 
+    
+#def setDataSource(filename):
+#   global dataSource
+#   dataSource = filename
+    
+def setValidationDataSource(filename):
+    global validationDataSource
+    validationDataSource = filename
+
+def setBiasLearning(boolVar):
+    global biasLearning
+    biasLearning = boolVar
+
+def setPLearningRate(r):
+    global pLearningRate
+    pLearningRate = r
+    
+def setQLearningRate(r):
+    global qLearningRate
+    qLearningRate = r
+    
+def setBLearningRate(r):
+    global bLearningRate
+    bLearningRate = r
+    
+def setRegularization(regLambda):
+    global regularization
+    regularization = regLambda
+    
+def setNumOfFeatures(f):
+    global numOfFeatures
+    numOfFeatures = f
+    
+def setNumOfIterations(i):
+    global numOfIterations
+    numOfIterations = i
+    
+#def printSettingStatus():
+#    print("Context type: ", contextType)
+#    print("Current context variable: ", contextVariable)
+#    print("Data source: ", dataSource)
+#    print("Bias learning scheme: ", biasLearning)
+#    print("User features learning rate: ", pLearningRate)
+#    print("Item features learning rate: ", qLearningRate)
+#    print("Bias learning rate: ", bLearningRate)
+#    print("Regularization parameter: ", regularization)
+#    print("Number of features: ", numOfFeatures)
+#    print("Number of learning iterations: ", numOfIterations)
+####################################################################################################
+     
+     
+     
+############################## GET RECOMMENDATIONS FUNCTIONS ########################################    
+def getRating(clientName,uID,iID):
+    #setContextType("no")
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt(clientName)
+    return calculateRating(clientName,uID,iID)
+
+def getRating_multiContext(clientName,uID,iID,contextValues):
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt_MultiContext(clientName)
+    getMultipleContextBiasesFromTxt(clientName)
+    return calculateRating_multiContext(clientName,uID,iID,contextValues)
+    
+def calculateRating(clientName,uID,iID):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    minRating = config.get('dataInfo', 'minrating')
+    maxRating = config.get('dataInfo', 'maxrating')
+    u= getGlobalBias()
+    bi = getItemBias(iID)
+    bu = getUserBias(uID)
+    p = getUserFeatureVector(uID)
+    q = getItemFeatureVector(iID)
+    r=plainModel(u,bu,bi,p,q)
+    return fixPredictedRating(r, float(minRating), float(maxRating))
+
+def calculateRating_multiContext(clientName,uID,iID,contextValues):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    minRating = config.get('dataInfo', 'minrating')
+    maxRating = config.get('dataInfo', 'maxrating')
+    u= getGlobalBias()
+    bi = getItemBias(iID)
+    bu = getUserBias(uID)
+    p = getUserFeatureVector(uID)
+    q = getItemFeatureVector(iID)
+    cntxtBiases= getCntxtBiases(uID,contextValues)
+    r=multipleCntxtModel ( u, bu, bi, p, q, cntxtBiases)
+    return fixPredictedRating(r, float(minRating), float(maxRating))
+
+def getTopN(clientName,uID,n):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+      
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt(clientName)
+   
+    rezMatItemRating = numpy.zeros([len(itemIDs),2])
+    for i, iID in enumerate(itemIDs):
+        rezMatItemRating[i,0] = iID
+        rezMatItemRating[i,1] = calculateRating(clientName,uID,iID)
+    sortedRezMatItemRating=rezMatItemRating[rezMatItemRating[:,1].argsort()]
+    top = sortedRezMatItemRating[:,0]
+    top = list(top)
+    top.reverse()
+    # reverse in numpy's array
+    #top = top[::-1]
+    return top[:n]    
+    
+def getBottomN(clientName,uID,n):
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+      
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt(clientName)
+    
+    rezMatItemRating = numpy.zeros([len(itemIDs),2])
+    for i, iID in enumerate(itemIDs):
+        rezMatItemRating[i,0] = iID
+        rezMatItemRating[i,1] = calculateRating(clientName,uID,iID)
+    sortedRezMatItemRating=rezMatItemRating[rezMatItemRating[:,1].argsort()]
+    bottom = sortedRezMatItemRating[:,0]
+    bottom = list(bottom)
+    return bottom[:n]    
+    
+def getTopN_multiContext(clientName,uID,n,contextValues):
+    global contextValPerVar
+    
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+    
+    contextValPerVar = config.get('dataInfo', 'contextvarsandvals')
+    contextValPerVar=contextValPerVar[1:len(contextValPerVar)-1]
+    contextValPerVar=contextValPerVar.split(', ')
+    contextValPerVar=[int(i) for i in contextValPerVar]
+    
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt_MultiContext(clientName)
+    
+    getMultipleContextBiasesFromTxt(clientName)
+    
+    
+    rezMatItemRating = numpy.zeros([len(itemIDs),2])
+    for i, iID in enumerate(itemIDs):
+        rezMatItemRating[i,0] = iID
+        rezMatItemRating[i,1] = calculateRating_multiContext(clientName,uID,iID,contextValues)
+    sortedRezMatItemRating=rezMatItemRating[rezMatItemRating[:,1].argsort()]
+    top = sortedRezMatItemRating[:,0]
+    top = list(top)
+    top.reverse()
+    # reverse in numpy's array
+    #top = top[::-1]
+    return top[:n]    
+    
+def getBottomN_multiContext(clientName,uID,n,contextValues):
+    global contextValPerVar
+    
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+    
+    contextValPerVar = config.get('dataInfo', 'contextvarsandvals')
+    contextValPerVar=contextValPerVar[1:len(contextValPerVar)-1]
+    contextValPerVar=contextValPerVar.split(', ')
+    contextValPerVar=[int(i) for i in contextValPerVar]
+    
+    getBiasesFromTxt(clientName)
+    getFeaturesFromTxt_MultiContext(clientName)
+    getMultipleContextBiasesFromTxt(clientName)
+        
+    rezMatItemRating = numpy.zeros([len(itemIDs),2])
+    for i, iID in enumerate(itemIDs):
+        rezMatItemRating[i,0] = iID
+        rezMatItemRating[i,1] = calculateRating_multiContext(clientName,uID,iID,contextValues)
+    sortedRezMatItemRating=rezMatItemRating[rezMatItemRating[:,1].argsort()]
+    bottom = sortedRezMatItemRating[:,0]
+    bottom = list(bottom)
+    return bottom[:n]    
+
+def getRandomItems (clientName, n):
+    # initialize result list
+    resultList = numpy.zeros(n)
+    
+    # get items' ids from conf File
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    
+    # turn itemIDs string into list of integers
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+    
+    # get random permutation
+    rand=numpy.random.permutation(len(itemIDs))
+    # select itemIDs based on random permutation    
+    for i in range(n):
+        resultList[i] = itemIDs[rand[i]]
+    
+    return resultList
+
+
+def getDiverseN(clientName, initialSetIds, n):
+    
+    resultList = numpy.zeros(n)
+    getFeaturesFromTxt(clientName)
+      
+    # read from configuration file  
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    
+    # turn itemIDs string into list of integers
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+    
+    # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrix[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrix[itemIDs[i],1]
+        
+    for i in range(len(initialSetIds)):     
+        sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialSetIds[i])[0], 0)
+        
+    numOfSelected=0
+    group = initialSetIds
+    
+    while numOfSelected < n:
+        distances = numpy.zeros([len(group)])
+        finalDistances = numpy.zeros([numpy.shape(sourceSet)[0]]) 
+        for i in range(numpy.shape(sourceSet)[0]):
+            for j in range(len(group)):
+                x=numpy.array((itemFeaturesMatrix[group[j], 0:2]))
+                y=numpy.array((sourceSet[i,1:3]))
+                distances[j] = numpy.linalg.norm(x-y)
+            
+            finalDistances[i]= math.sqrt(sum(numpy.power(distances,2)))
+        indexOfMax = numpy.argmax(finalDistances)
+        
+        selectedItemId = sourceSet[indexOfMax,0]
+        
+        group = numpy.append(group, selectedItemId)
+        resultList[numOfSelected] = selectedItemId
+        numOfSelected = numOfSelected + 1
+        sourceSet=numpy.delete(sourceSet, indexOfMax,0)
+    return resultList
+    
+    
+def getSimilarN(clientName, initialItemId, n):
+    # get features
+    getFeaturesFromTxt(clientName)
+      
+    # read from configuration file  
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    itemIDs = config.get('dataInfo', 'itemids')
+    
+    # turn itemIDs string into list of integers
+    itemIDs=itemIDs[1:len(itemIDs)-1]
+    itemIDs=itemIDs.split(', ')
+    itemIDs=[int(i) for i in itemIDs]
+    
+    # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrix[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrix[itemIDs[i],1]
+    sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialItemId)[0], 0)
+        
+    # prepare the matrix for distances
+    distances = numpy.zeros([numpy.shape(sourceSet)[0],2])
+    
+    # get coordinates of input item
+    initialItemCoords = itemFeaturesMatrix[initialItemId, 0:2]
+    
+    # calculate all distances
+    for i in range(len(sourceSet)):
+        x=numpy.array((sourceSet[i,1:3]))
+        y=numpy.array((initialItemCoords))
+        distances[i,1] = numpy.linalg.norm(x-y)
+        distances[i,0] = sourceSet[i,0]
+            
+    #sort distances and take n smallest    
+    distances=distances[distances[:,1].argsort()]
+    resultList = distances[0:n,0]
+    
+    return resultList
+
+def getRandomItems_fromSubSet (clientName, n, subSet):
+    # initialize result list
+    resultList = numpy.zeros(n)
+    if subSet == 0:
+        # get items' ids from conf File
+        confFileName = mainDataPath + '/' + clientName + '.cfg'
+        config = configparser.RawConfigParser()
+        config.read(confFileName)
+        itemIDs = config.get('dataInfo', 'itemids')
+    
+        # turn itemIDs string into list of integers
+        itemIDs=itemIDs[1:len(itemIDs)-1]
+        itemIDs=itemIDs.split(', ')
+        itemIDs=[int(i) for i in itemIDs]
+    elif subSet == 1:
+        #subSetFileName = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+        subSetIDsFileName = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+        itemIDs = numpy.loadtxt(subSetIDsFileName, delimiter=';')
+    
+    # get random permutation
+    rand=numpy.random.permutation(len(itemIDs))
+    # select itemIDs based on random permutation    
+    for i in range(n):
+        resultList[i] = itemIDs[rand[i]]
+    
+    return resultList
+
+def getDiverseN_fromSubSet(clientName, initialSetIds, n, subSet):
+    
+    resultList = numpy.zeros(n)
+    
+    if subSet ==0:
+        getFeaturesFromTxt(clientName)
+      
+        # read from configuration file  
+        confFileName = mainDataPath + '/' + clientName + '.cfg'
+        config = configparser.RawConfigParser()
+        config.read(confFileName)
+        itemIDs = config.get('dataInfo', 'itemids')
+    
+        # turn itemIDs string into list of integers
+        itemIDs=itemIDs[1:len(itemIDs)-1]
+        itemIDs=itemIDs.split(', ')
+        itemIDs=[int(i) for i in itemIDs]
+        
+        itemFeaturesMatrixFinal = itemFeaturesMatrix
+        
+        
+    elif subSet==1:
+        subSetIDsFileName = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+        itemIDs = numpy.loadtxt(subSetIDsFileName, delimiter=';')
+        subSetFeaturesFileName = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+        itemFeaturesSubSetMatrix = numpy.loadtxt(subSetFeaturesFileName, delimiter=';')
+        
+        itemFeaturesMatrixFinal = itemFeaturesSubSetMatrix
+    
+    
+        # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrixFinal[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrixFinal[itemIDs[i],1]
+        
+    
+    
+    for i in range(len(initialSetIds)):     
+        sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialSetIds[i])[0], 0)
+        
+    numOfSelected=0
+    group = initialSetIds
+    
+    while numOfSelected < n:
+        distances = numpy.zeros([len(group)])
+        finalDistances = numpy.zeros([numpy.shape(sourceSet)[0]]) 
+        for i in range(numpy.shape(sourceSet)[0]):
+            for j in range(len(group)):
+                x=numpy.array((itemFeaturesMatrixFinal[group[j], 0:2]))
+                y=numpy.array((sourceSet[i,1:3]))
+                distances[j] = numpy.linalg.norm(x-y)
+            
+            finalDistances[i]= math.sqrt(sum(numpy.power(distances,2)))
+        indexOfMax = numpy.argmax(finalDistances)
+        
+        selectedItemId = sourceSet[indexOfMax,0]
+        
+        group = numpy.append(group, selectedItemId)
+        resultList[numOfSelected] = selectedItemId
+        numOfSelected = numOfSelected + 1
+        sourceSet=numpy.delete(sourceSet, indexOfMax,0)
+    return resultList
+    
+def getSimilarN_fromSubSet(clientName, initialItemId, n,subSet):
+    # get features
+    
+    initialItemId = int(initialItemId)
+    if subSet ==0:
+        getFeaturesFromTxt(clientName)
+      
+        # read from configuration file  
+        confFileName = mainDataPath + '/' + clientName + '.cfg'
+        config = configparser.RawConfigParser()
+        config.read(confFileName)
+        itemIDs = config.get('dataInfo', 'itemids')
+    
+        # turn itemIDs string into list of integers
+        itemIDs=itemIDs[1:len(itemIDs)-1]
+        itemIDs=itemIDs.split(', ')
+        itemIDs=[int(i) for i in itemIDs]
+    
+        itemFeaturesMatrixFinal = itemFeaturesMatrix
+    
+    elif subSet==1:
+        subSetIDsFileName = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+        itemIDs = numpy.loadtxt(subSetIDsFileName, delimiter=';')
+        subSetFeaturesFileName = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+        itemFeaturesSubSetMatrix = numpy.loadtxt(subSetFeaturesFileName, delimiter=';')
+        
+        itemFeaturesMatrixFinal = itemFeaturesSubSetMatrix
+    
+    
+    # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrixFinal[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrixFinal[itemIDs[i],1]
+    sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialItemId)[0], 0)
+        
+    # prepare the matrix for distances
+    distances = numpy.zeros([numpy.shape(sourceSet)[0],2])
+    
+    # get coordinates of input item
+    initialItemCoords = itemFeaturesMatrixFinal[initialItemId, 0:2]
+    
+    # calculate all distances
+    for i in range(len(sourceSet)):
+        x=numpy.array((sourceSet[i,1:3]))
+        y=numpy.array((initialItemCoords))
+        distances[i,1] = numpy.linalg.norm(x-y)
+        distances[i,0] = sourceSet[i,0]
+            
+    #sort distances and take n smallest    
+    distances=distances[distances[:,1].argsort()]
+    resultList = distances[0:n,0]
+    
+    return resultList
+    
+def getDiverse4_fromSubSet_Vodlan(clientName, initialSetIds, n, subSet, avoidSetIDs):
+    
+    resultList = numpy.zeros(n)
+    
+    if subSet ==0:
+        getFeaturesFromTxt(clientName)
+      
+        # read from configuration file  
+        confFileName = mainDataPath + '/' + clientName + '.cfg'
+        config = configparser.RawConfigParser()
+        config.read(confFileName)
+        itemIDs = config.get('dataInfo', 'itemids')
+    
+        # turn itemIDs string into list of integers
+        itemIDs=itemIDs[1:len(itemIDs)-1]
+        itemIDs=itemIDs.split(', ')
+        itemIDs=[int(i) for i in itemIDs]
+        
+        itemFeaturesMatrixFinal = itemFeaturesMatrix
+        
+        
+    elif subSet==1:
+        subSetIDsFileName = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+        itemIDs = numpy.loadtxt(subSetIDsFileName, delimiter=';')
+        subSetFeaturesFileName = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+        itemFeaturesSubSetMatrix = numpy.loadtxt(subSetFeaturesFileName, delimiter=';')
+        
+        itemFeaturesMatrixFinal = itemFeaturesSubSetMatrix
+    
+    
+        # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrixFinal[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrixFinal[itemIDs[i],1]
+    
+    
+    initialItemData = numpy.zeros([len(initialSetIds),3])
+    for i in range(len(initialItemData)):
+        initialItemData[i,:] =sourceSet[numpy.where(sourceSet[:,0]==initialSetIds[i])[0][0],:]
+    
+    for i in range(len(initialSetIds)):     
+               
+        sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialSetIds[i])[0], 0)
+        
+        for k in avoidSetIDs:
+            sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==k)[0], 0)
+        
+        simItems = getSimilarItems_fromList(sourceSet, initialItemData[i], 10)
+        for j in simItems:
+            sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==j)[0], 0)
+            
+       
+    quad1 = numpy.zeros([3])
+    quad2 = numpy.zeros([3])
+    quad3 = numpy.zeros([3])
+    quad4 = numpy.zeros([3])
+    
+    
+    for i in range(len(sourceSet)):   
+        axisX = sourceSet[i,1]
+        axisY = sourceSet[i,2]
+        
+        if axisX>0.06  and  axisY >0.035:
+            quad1 = numpy.vstack([quad1, sourceSet[i,:]])
+        elif axisX<0.06  and  axisY >0.035:
+            quad2 = numpy.vstack([quad2, sourceSet[i,:]])
+        elif axisX<0.06  and  axisY <0.035:
+            quad3 = numpy.vstack([quad3, sourceSet[i,:]])
+        else:
+            quad4 = numpy.vstack([quad4, sourceSet[i,:]])
+        
+    quad1=numpy.delete(quad1, [0], 0)
+    quad2=numpy.delete(quad2, [0], 0)
+    quad3=numpy.delete(quad3, [0], 0)
+    quad4=numpy.delete(quad4, [0], 0)
+            
+            
+            
+    orderOfQuadrants = numpy.random.permutation(4)
+    orderOfQuadrants=orderOfQuadrants+1
+       
+    for i in orderOfQuadrants:
+        if i == 1:
+            selected =  getRandomItems_fromList (quad1[:,0], 1)
+        elif i == 2:
+            selected =  getRandomItems_fromList (quad2[:,0], 1)
+        elif i == 3:
+            selected =  getRandomItems_fromList (quad3[:,0], 1)
+        elif i == 4:
+            selected =  getRandomItems_fromList (quad4[:,0], 1)
+            
+        resultList[i-1] =  selected
+        
+        initItemData =sourceSet[numpy.where(sourceSet[:,0]==selected)[0][0],:]
+        simItems = getSimilarItems_fromList(sourceSet, initItemData, 10)
+        for j in simItems:
+            if quad1.shape[0] > 1:
+                quad1=numpy.delete(quad1, numpy.where(quad1[:,0]==j)[0], 0)
+            if quad2.shape[0] > 1:
+                quad2=numpy.delete(quad2, numpy.where(quad2[:,0]==j)[0], 0)
+            if quad3.shape[0] > 1:
+                quad3=numpy.delete(quad3, numpy.where(quad3[:,0]==j)[0], 0)
+            if quad4.shape[0] > 1:
+                quad4=numpy.delete(quad4, numpy.where(quad4[:,0]==j)[0], 0)
+            
+       
+    resultList = [int(i) for i in resultList]
+    return resultList
+        
+    
+def getRandomItems_fromList (fromList, n):
+    rand=numpy.random.permutation(len(fromList))
+    # select itemIDs based on random permutation    
+    resultList = numpy.zeros(n)
+    for i in range(n):
+        resultList[i] = fromList[rand[i]]
+    
+    return resultList
+    
+    
+def getSimilarItems_fromList(fromListData, initialItemData, n):
+                
+    # prepare the matrix for distances
+    distances = numpy.zeros([numpy.shape(fromListData)[0],2])
+    
+    # get coordinates of input item
+    initialItemCoords = initialItemData[1:2]
+    
+    # calculate all distances
+    for i in range(len(fromListData)):
+        x=numpy.array((fromListData[i,1:3]))
+        y=numpy.array((initialItemCoords))
+        distances[i,1] = numpy.linalg.norm(x-y)
+        distances[i,0] = fromListData[i,0]
+            
+    #sort distances and take n smallest    
+    distances=distances[distances[:,1].argsort()]
+    resultList = distances[0:n,0]
+    
+    return resultList
+	
+def getSimilarN_fromSubSet_avoid(clientName, initialItemId, n, subSet, avoidSetIDs):
+    # get features
+    
+    initialItemId = int(initialItemId)
+    if subSet ==0:
+        getFeaturesFromTxt(clientName)
+      
+        # read from configuration file  
+        confFileName = mainDataPath + '/' + clientName + '.cfg'
+        config = configparser.RawConfigParser()
+        config.read(confFileName)
+        itemIDs = config.get('dataInfo', 'itemids')
+    
+        # turn itemIDs string into list of integers
+        itemIDs=itemIDs[1:len(itemIDs)-1]
+        itemIDs=itemIDs.split(', ')
+        itemIDs=[int(i) for i in itemIDs]
+    
+        itemFeaturesMatrixFinal = itemFeaturesMatrix
+    
+    elif subSet==1:
+        subSetIDsFileName = mainDataPath + '/' + clientName + '_subSetOfItems.txt'
+        itemIDs = numpy.loadtxt(subSetIDsFileName, delimiter=';')
+        subSetFeaturesFileName = mainResultPath + '/' + clientName + '_itemFeaturesSubSet.txt'
+        itemFeaturesSubSetMatrix = numpy.loadtxt(subSetFeaturesFileName, delimiter=';')
+        
+        itemFeaturesMatrixFinal = itemFeaturesSubSetMatrix
+    
+    
+    # prepare the set of items other than initial  
+    sourceSet = numpy.zeros([len(itemIDs),3])
+    for i in range(len(itemIDs)):
+        sourceSet[i,0]= itemIDs[i]
+        sourceSet[i,1]= itemFeaturesMatrixFinal[itemIDs[i],0]
+        sourceSet[i,2]= itemFeaturesMatrixFinal[itemIDs[i],1]
+    sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==initialItemId)[0], 0)
+        
+         
+    #delete avoid items
+    for j in avoidSetIDs:
+        sourceSet=numpy.delete(sourceSet, numpy.where(sourceSet[:,0]==j)[0], 0)
+        
+    # prepare the matrix for distances
+    distances = numpy.zeros([numpy.shape(sourceSet)[0],2])
+    
+    # get coordinates of input item
+    initialItemCoords = itemFeaturesMatrixFinal[initialItemId, 0:2]
+    
+    # calculate all distances
+    for i in range(len(sourceSet)):
+        x=numpy.array((sourceSet[i,1:3]))
+        y=numpy.array((initialItemCoords))
+        distances[i,1] = numpy.linalg.norm(x-y)
+        distances[i,0] = sourceSet[i,0]
+            
+    #sort distances and take n smallest    
+    distances=distances[distances[:,1].argsort()]
+    resultList = distances[0:n,0]
+    resultList = [int(i) for i in resultList]
+    return resultList    	
+
+####################################################################################################
+
+
+
+######################################## CONTROL FUNCTIONS #########################################
+#def updateLearnedDB():
+#def learn():
+####################################################################################################
+
+
+
+############################## FETCH FROM DATABASE FUNCTIONS ########################################
+def getBiasesFromTxt(clientName):
+    global globalBiasMatrix
+    global userBiasesMatrix
+    global itemBiasesMatrix
+    globalBiasFilename = mainResultPath + '/' + clientName + '_' + 'globalBias.txt'
+    userBiasFilename = mainResultPath + '/' + clientName + '_' + 'userBias.txt'
+    itemBiasFilename = mainResultPath + '/' + clientName + '_' + 'itemBias.txt'
+    globalBiasMatrix = numpy.loadtxt(globalBiasFilename, delimiter=';')
+    userBiasesMatrix = numpy.loadtxt(userBiasFilename, delimiter=';')
+    itemBiasesMatrix = numpy.loadtxt(itemBiasFilename, delimiter=';')
+        
+def getFeaturesFromTxt(clientName):
+    global userFeaturesMatrix
+    global itemFeaturesMatrix
+    userFeaturesFilename = mainResultPath + '/' + clientName + '_' + 'userFeatures.txt'
+    itemFeaturesFilename = mainResultPath + '/' + clientName + '_' + 'itemFeatures.txt'
+    userFeaturesMatrix = numpy.loadtxt(userFeaturesFilename, delimiter=';')
+    itemFeaturesMatrix = numpy.loadtxt(itemFeaturesFilename, delimiter=';')
+    
+def getFeaturesFromTxt_MultiContext(clientName):
+    global userFeaturesMatrix
+    global itemFeaturesMatrix
+    
+    userFeaturesMultipleFilename = mainResultPath + '/' + clientName + '_' + 'userFeaturesMultiple.txt'
+    itemFeaturesMultipleFilename = mainResultPath + '/' + clientName + '_' + 'itemFeaturesMultiple.txt'
+    userFeaturesMatrix = numpy.loadtxt(userFeaturesMultipleFilename, delimiter=';')
+    itemFeaturesMatrix = numpy.loadtxt(itemFeaturesMultipleFilename, delimiter=';')
+    
+def getMultipleContextBiasesFromTxt(clientName):
+    global multipleContextUserBiasesMatrix
+    confFileName = mainDataPath + '/' + clientName + '.cfg'
+    config = configparser.RawConfigParser()
+    config.read(confFileName)
+    
+    contextValPerVar = config.get('dataInfo', 'contextvarsandvals')
+    contextValPerVar=contextValPerVar[1:len(contextValPerVar)-1]
+    contextValPerVar=contextValPerVar.split(', ')
+    contextValPerVar=[int(i) for i in contextValPerVar]
+    
+    
+    userBiasesMultipleFilename = mainResultPath + '/' + clientName + '_' + 'userBias.txt'
+    userBiases = numpy.loadtxt(userBiasesMultipleFilename, delimiter=';')
+    multipleContextUserBiasesMatrix=numpy.zeros([len(contextValPerVar),numpy.max(userBiases)+1,max(contextValPerVar)])
+    
+    for i in range(len(contextValPerVar)):
+        filename = mainResultPath + '/' + clientName + '_' + 'userBiasPerContext' + str(i) + '.txt'
+        multipleContextUserBiasesMatrix[i,:,:] = numpy.loadtxt(filename, delimiter=';')
+    
+def getGlobalBias():
+    data=globalBiasMatrix
+    return data
+
+def getUserBias(userID):
+    data=userBiasesMatrix
+    usrIndexList = list(data[:,0])
+    index = usrIndexList.index (userID)
+    return data[index,1]
+
+def getItemBias(itemID):
+    data=itemBiasesMatrix
+    itmIndexList = list(data[:,0])
+    index = itmIndexList.index (itemID)
+    return data[index,1]
+
+def getUserFeatureVector(userID):
+    data=userFeaturesMatrix
+    return data[userID,1:]
+
+def getItemFeatureVector(itemID):
+    data=itemFeaturesMatrix
+    return data[itemID,1:]
+
+def getContextInformation(data):
+    global contextValPerVar
+    contextValPerVar = numpy.zeros(data.shape[1]-3)
+    #for loop for every context variable in the dataset
+    for i in range(data.shape[1]-3):
+        values=(numpy.unique(data[:,3+i]))
+        if values[0] == 0:
+            values = numpy.delete(values,0)
+        contextValPerVar[i]=len(values)
+        
+def getCntxtBiases(userID,contextValues):
+    cntxtBiases = numpy.zeros(len(contextValues))
+    
+    for i in range(len(contextValues)):
+        if contextValues[i]==0:
+            cntxtBiases[i] = 0
+            
+        else:
+            cntxtBiases[i]=multipleContextUserBiasesMatrix[i,userID,int(contextValues[i])-1]
+    
+    return cntxtBiases    
+####################################################################################################
+
+
+
+######################################## MODELING FUNCTIONS ########################################
+#classified!
+
+def trainPlainModel(clientName):
+
+def trainMultipleCntxtModel(clientName):
+    
+def validatePlainModel(clientName):
+
+def validateMultipleCntxtModel(clientName):
+
+def calculateStaticBiases (data,clientName):
+ 
+def calculateMultipleContextStaticBiases(data, clientName):
+             
+def fixPredictedRating (predictedR, minRating, maxRating ):
+        
+def multipleCntxtModel ( u, bu, bi, p, q, cntxtBiases):
+   
+def plainModel ( u, bu, bi, p, q ):
+    
